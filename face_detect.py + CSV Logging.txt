@@ -1,0 +1,102 @@
+from picamera2 import Picamera2
+import cv2
+from flask import Flask, Response
+import time
+import csv
+import os
+import psutil
+
+# Config
+FACE_CASCADE_FILE = 'haarcascade_frontalface_default.xml'
+CAM_RESOLUTION = (320, 240)
+FPS = 10
+DETECT_DELAY = 0.7
+CSV_FILE = 'face_log.csv'
+CSV_INTERVAL = 1.0
+
+face_cascade = cv2.CascadeClassifier(FACE_CASCADE_FILE)
+picam2 = Picamera2()
+config = picam2.create_preview_configuration(main={"size": CAM_RESOLUTION})
+picam2.configure(config)
+picam2.start()
+time.sleep(1)
+
+app = Flask(__name__)
+last_detect_time = 0
+last_csv_time = 0
+frame_time = time.time()
+face_count = 0
+
+# Prepare CSV
+if not os.path.exists(CSV_FILE):
+    with open(CSV_FILE, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['timestamp', 'faces_detected', 'face_count'])
+
+# Video generator
+def gen_frames():
+    global last_detect_time, last_csv_time, frame_time, face_count
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    while True:
+        frame = picam2.capture_array()
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = clahe.apply(gray)
+        gray = cv2.equalizeHist(gray)
+
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5)
+        if len(faces) > 0:
+            face_count += 1
+
+        for (x, y, w, h) in faces:
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+        current_time = time.time()
+        if current_time - last_detect_time > DETECT_DELAY:
+            # Calculate FPS
+            fps_real = 1 / (current_time - frame_time)
+            frame_time = current_time
+
+            # CPU load
+            cpu_load = psutil.cpu_percent()
+            # CPU temp
+            try:
+                with open("/sys/class/thermal/thermal_zone0/temp","r") as f:
+                    cpu_temp = float(f.read())/1000
+            except:
+                cpu_temp = 0.0
+
+            print(f"Face: {'Detected' if len(faces)>0 else 'Not detected'} | Total: {face_count} | CPU Load: {cpu_load:.1f}% | Temp: {cpu_temp:.1f}°C | FPS: {fps_real:.1f}")
+            last_detect_time = current_time
+
+        if current_time - last_csv_time > CSV_INTERVAL:
+            with open(CSV_FILE, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([time.strftime('%Y-%m-%d %H:%M:%S'), len(faces), face_count])
+            last_csv_time = current_time
+
+        ret, buffer = cv2.imencode('.jpg', frame)
+        if not ret:
+            continue
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+        time.sleep(1/FPS)
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/')
+def index():
+    return '''
+    <html>
+        <head><title>Face Detection + CSV</title></head>
+        <body>
+            <h1>Face Detection + CSV Logging</h1>
+            <img src="/video_feed" width="320" height="240">
+        </body>
+    </html>
+    '''
+
+if __name__ == "__main__":
+    print("Starting Face Detection. Open http://<Pi_IP>:5000")
+    app.run(host='0.0.0.0', port=5000, debug=False)
