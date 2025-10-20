@@ -1,0 +1,6 @@
+# Library หลักสำหรับการประมวลผลภาพ
+opencv-python
+numpy
+imutils
+pandas
+scipy
